@@ -5,12 +5,10 @@ import platform
 import logging
 import sys
 import os
-import sys
 if sys.version_info.major == 2:
     import gobject
 else:
     from gi.repository import GLib as gobject
-import sys
 import time
 import requests # for http GET
 import configparser # for config/ini file
