@@ -10,6 +10,7 @@ if sys.version_info.major == 2:
 else:
     from gi.repository import GLib as gobject
 import time
+import math
 import requests # for http GET
 import configparser # for config/ini file
 
@@ -158,22 +159,43 @@ class DbusWARPChargerService:
     def _update(self):
         try:
             # read out meter values (only WARP Pro Charger)
-            data = self.getWARPChargerData("/meters/0/config")
-            if data is not None and data[1] != None:
+            config = self.getWARPChargerData("/meters/0/config")
+            enegry_import = float('nan')
+            if config is not None and config[1] != None:
                 # read meter data
-                data = self.getWARPChargerData("/meters/0/values")
-                if data is not None:
-                    self._dbusservice['/Ac/L1/Power'] = float(data[6])
-                    self._dbusservice['/Ac/L2/Power'] = float(data[7])
-                    self._dbusservice['/Ac/L3/Power'] = float(data[8])
-                    
-                    self._dbusservice['/Ac/Power'] = float(data[21])
-                    self._dbusservice['/Ac/Voltage'] = float(data[18])
-                    self._dbusservice['/Ac/Frequency'] = float(data[25])
-                    
-                    self._dbusservice['/Current'] = float(data[19])
-                    
-                    
+                value_ids = self.getWARPChargerData("/meters/0/value_ids")
+                values = self.getWARPChargerData("/meters/0/values")
+                if values is not None and value_ids is not None:
+                    def get_meter_value(value_id):
+                        try:
+                            return float(values[value_ids.index(value_id)])
+                        except:
+                            return float('nan')
+
+                    VoltageLNAvg = 7
+                    CurrentLSumImExSum = 33
+                    PowerActiveL1ImExDiff = 39
+                    PowerActiveL2ImExDiff = 48
+                    PowerActiveL3ImExDiff = 57
+                    PowerActiveLSumImExDiff = 74
+                    EnergyActiveLSumImport = 209
+                    EnergyActiveLSumImExSum = 213
+                    FrequencyLAvg = 364
+
+                    self._dbusservice['/Ac/L1/Power'] = get_meter_value(PowerActiveL1ImExDiff)
+                    self._dbusservice['/Ac/L2/Power'] = get_meter_value(PowerActiveL2ImExDiff)
+                    self._dbusservice['/Ac/L3/Power'] = get_meter_value(PowerActiveL3ImExDiff)
+
+                    self._dbusservice['/Ac/Power'] = get_meter_value(PowerActiveLSumImExDiff)
+                    self._dbusservice['/Ac/Voltage'] = get_meter_value(VoltageLNAvg)
+                    self._dbusservice['/Ac/Frequency'] = get_meter_value(FrequencyLAvg)
+
+                    self._dbusservice['/Current'] = get_meter_value(CurrentLSumImExSum)
+
+                    enegry_import = get_meter_value(EnergyActiveLSumImport)
+                    if math.isnan(enegry_import):
+                        enegry_import = get_meter_value(EnergyActiveLSumImExSum)
+
             # read mode stuff
             pmcm = self.getWARPChargerData("/power_manager/charge_mode")
             if pmcm["mode"] == 0: # fast
@@ -196,7 +218,7 @@ class DbusWARPChargerService:
             if es is not None and ell is not None:
                 if es["charger_state"] == 3:
                     self._dbusservice['/ChargingTime'] = int(ell["time_since_state_change"] / 1000.0)
-                    self._dbusservice['/Ac/Energy/Forward'] = float(data[36]-cc["meter_start"]) # calculate charged energy
+                    self._dbusservice['/Ac/Energy/Forward'] = float(enegry_import - cc["meter_start"]) # calculate charged energy
                 else:
                     self._dbusservice['/ChargingTime'] = 0
                     self._dbusservice['/Ac/Energy/Forward'] = 0.0 # calculate charged energy
