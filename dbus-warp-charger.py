@@ -125,7 +125,7 @@ class DbusWARPChargerService:
     def setWARPChargerValue(self, path, dat):
         try:
             request_data = requests.put(url = "http://" + self.ip + path, json = dat, timeout=5)
-        except Exception:
+        except Exception as e:
             logging.critical('Error at %s', '_update', exc_info=e)
 
 
