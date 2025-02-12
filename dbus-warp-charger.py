@@ -98,9 +98,9 @@ class DbusWARPChargerService:
         logging.critical("someone else updated %s to %s" % (path, value))
 
         if path == '/MaxCurrent':
-            self.setWARPChargerValue("/evse/external_current", {"current": int(value * 1000)})
+            self.setWARPChargerValue("/evse/global_current", {"current": int(value * 1000)})
         elif path == '/SetCurrent':
-            pass # ignore, only maxCurrent Implemented
+            self.setWARPChargerValue("/evse/external_current", {"current": int(value * 1000)})
         elif path == '/AutoStart':
             if value == 0:
                 self.setWARPChargerValue("/evse/auto_start_charging", {"auto_start_charging": "false"})
