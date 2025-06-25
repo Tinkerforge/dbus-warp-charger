@@ -18,6 +18,25 @@ import configparser # for config/ini file
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python'))
 from vedbus import VeDbusService
 
+VoltageLNAvg = 7
+CurrentLSumImExSum = 33
+PowerActiveL1ImExDiff = 39
+PowerActiveL2ImExDiff = 48
+PowerActiveL3ImExDiff = 57
+PowerActiveLSumImExDiff = 74
+EnergyActiveLSumImport = 209
+EnergyActiveLSumImExSum = 213
+FrequencyLAvg = 364
+
+index_map = [
+    ('/Ac/L1/Power', PowerActiveL1ImExDiff),
+    ('/Ac/L2/Power', PowerActiveL2ImExDiff),
+    ('/Ac/L3/Power', PowerActiveL3ImExDiff),
+    ('/Ac/Power', PowerActiveLSumImExDiff),
+    ('/Ac/Voltage', VoltageLNAvg),
+    ('/Ac/Frequency', FrequencyLAvg),
+    ('/Current', CurrentLSumImExSum)
+]
 
 """
 Wallbox settings:
@@ -33,7 +52,7 @@ class DbusWARPChargerService:
         self.ip = str(config['DEFAULT']['IP'])
         self.acposition = int(config['DEFAULT']['Position'])
 
-        self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance))
+        self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance), register=False)
         self._paths = paths
 
         self.enable_charging = True # start/stop
@@ -66,6 +85,8 @@ class DbusWARPChargerService:
         for path, settings in self._paths.items():
             self._dbusservice.add_path(path, settings['initial'], gettextcallback=settings['textformat'], writeable=True, onchangecallback=self._handlechangedvalue)
 
+        self._dbusservice.register()
+
         # last update
         self._lastUpdate = 0
 
@@ -73,10 +94,16 @@ class DbusWARPChargerService:
         self._chargingTime = 0.0
 
         # add _update function 'timer'
-        gobject.timeout_add(250, self._update) # pause 250ms before the next request
+        gobject.timeout_add(self._getUpdateInterval() * 1000, self._update)
 
         # add _signOfLife 'timer' to get feedback in log every 5minutes
         gobject.timeout_add(self._getSignOfLifeInterval()*60*1000, self._signOfLife)
+
+        self._meter_config = None
+        self._meter_value_indices = None
+        self._energy_import_meter_value_index = None
+        self._last_evse_uptime_start = None
+        self._last_evse_uptime_start_change = None
 
     def _getConfig(self):
         config = configparser.ConfigParser()
@@ -93,6 +120,15 @@ class DbusWARPChargerService:
 
         return int(value)
 
+    def _getUpdateInterval(self):
+        config = self._getConfig()
+        value = config['DEFAULT']['UpdateInterval']
+
+        if not value:
+            value = 1
+
+        return int(value)
+
 
     def _handlechangedvalue(self, path, value):
         logging.critical("someone else updated %s to %s" % (path, value))
@@ -103,9 +139,9 @@ class DbusWARPChargerService:
             self.setWARPChargerValue("/evse/external_current", {"current": int(value * 1000)})
         elif path == '/AutoStart':
             if value == 0:
-                self.setWARPChargerValue("/evse/auto_start_charging", {"auto_start_charging": "false"})
+                self.setWARPChargerValue("/evse/auto_start_charging", {"auto_start_charging": False})
             else:
-                self.setWARPChargerValue("/evse/auto_start_charging", {"auto_start_charging": "true"})
+                self.setWARPChargerValue("/evse/auto_start_charging", {"auto_start_charging": True})
         elif path == '/Mode':
             if value == 0: # manual
                 self.setWARPChargerValue("/power_manager/charge_mode", {"mode": 0}) # fast
@@ -124,105 +160,104 @@ class DbusWARPChargerService:
 
 
     def setWARPChargerValue(self, path, dat):
-        try:
-            request_data = requests.put(url = "http://" + self.ip + path, json = dat, timeout=5)
-        except Exception as e:
-            logging.critical('Error at %s', '_update', exc_info=e)
-
+        requests.put(url = "http://" + self.ip + path, json = dat, timeout=5)
 
     def getWARPChargerData(self, path):
-        URL = "http://" + self.ip + path
-        try:
-            request_data = requests.get(url = URL, timeout=5)
-        except Exception:
-            return None
-
-        # check for response
-        if not request_data:
-            raise ConnectionError("No response from WARP Charger - %s" % (URL))
-
-        json_data = request_data.json()
-
-        # check for Json
-        if not json_data:
-            raise ValueError("Converting response to JSON failed")
-
-        return json_data
+        return requests.get(url="http://" + self.ip + path, timeout=5).json()
 
     def _signOfLife(self):
+        self._update_meter_value_id_cache()
         logging.info("--- Start: sign of life ---")
         logging.info("Last _update() call: %s" % (self._lastUpdate))
         logging.info("Last '/Ac/Power': %s" % (self._dbusservice['/Ac/Power']))
         logging.info("--- End: sign of life ---")
         return True
 
+    def _update_meter_value_id_cache(self):
+        self._meter_value_indices = None
+        self._energy_import_meter_value_index = None
+
+        config = self.getWARPChargerData("/meters/0/config")
+
+        if config is None or config[1] is None:
+            return
+
+        value_ids = self.getWARPChargerData("/meters/0/value_ids")
+        if value_ids is None:
+            return
+
+        if self._meter_value_indices is None:
+            self._meter_value_indices = [0] * len(index_map)
+
+        for i, tup in enumerate(index_map):
+            _, mvID = tup
+            try:
+                self._meter_value_indices[i] = value_ids.index(mvID)
+            except ValueError:
+                self._meter_value_indices[i] = None
+
+        try:
+            self._energy_import_meter_value_index = value_ids.index(EnergyActiveLSumImport)
+        except ValueError:
+            try:
+                self._energy_import_meter_value_index = value_ids.index(EnergyActiveLSumImExSum)
+            except ValueError:
+                pass
+
     def _update(self):
         try:
+            if self._meter_value_indices is None:
+                self._update_meter_value_id_cache()
+
             # read out meter values (only WARP Pro Charger)
-            config = self.getWARPChargerData("/meters/0/config")
-            enegry_import = float('nan')
-            if config is not None and config[1] != None:
+
+            energy_import = float('nan')
+            if self._meter_value_indices is not None:
                 # read meter data
-                value_ids = self.getWARPChargerData("/meters/0/value_ids")
                 values = self.getWARPChargerData("/meters/0/values")
-                if values is not None and value_ids is not None:
-                    def get_meter_value(value_id):
-                        try:
-                            return float(values[value_ids.index(value_id)])
-                        except:
-                            return float('nan')
+                if values is not None:
+                    for i, idx in enumerate(self._meter_value_indices):
+                        if idx is None:
+                            continue
+                        self._dbusservice[index_map[i][0]] = values[idx]
 
-                    VoltageLNAvg = 7
-                    CurrentLSumImExSum = 33
-                    PowerActiveL1ImExDiff = 39
-                    PowerActiveL2ImExDiff = 48
-                    PowerActiveL3ImExDiff = 57
-                    PowerActiveLSumImExDiff = 74
-                    EnergyActiveLSumImport = 209
-                    EnergyActiveLSumImExSum = 213
-                    FrequencyLAvg = 364
-
-                    self._dbusservice['/Ac/L1/Power'] = get_meter_value(PowerActiveL1ImExDiff)
-                    self._dbusservice['/Ac/L2/Power'] = get_meter_value(PowerActiveL2ImExDiff)
-                    self._dbusservice['/Ac/L3/Power'] = get_meter_value(PowerActiveL3ImExDiff)
-
-                    self._dbusservice['/Ac/Power'] = get_meter_value(PowerActiveLSumImExDiff)
-                    self._dbusservice['/Ac/Voltage'] = get_meter_value(VoltageLNAvg)
-                    self._dbusservice['/Ac/Frequency'] = get_meter_value(FrequencyLAvg)
-
-                    self._dbusservice['/Current'] = get_meter_value(CurrentLSumImExSum)
-
-                    enegry_import = get_meter_value(EnergyActiveLSumImport)
-                    if math.isnan(enegry_import):
-                        enegry_import = get_meter_value(EnergyActiveLSumImExSum)
+                    if self._energy_import_meter_value_index is not None:
+                        energy_import = values[self._energy_import_meter_value_index]
 
             # read mode stuff
             pmcm = self.getWARPChargerData("/power_manager/charge_mode")
-            if pmcm["mode"] == 0: # fast
-                self._dbusservice['/Mode'] = 0 # manual
-            elif pmcm["mode"] == 1: # disabled
-                self._dbusservice['/Mode'] = 0 # manual
-                self._dbusservice['/StartStop'] = 0 # disabled
-            elif pmcm["mode"] == 2 or pmcm["mode"] == 3: # pv / pv+min
-                self._dbusservice['/Mode'] = 1 # automatic
+            if pmcm is not None:
+                if pmcm["mode"] == 0: # fast
+                    self._dbusservice['/Mode'] = 0 # manual
+                elif pmcm["mode"] == 1: # disabled
+                    self._dbusservice['/Mode'] = 0 # manual
+                    self._dbusservice['/StartStop'] = 0 # disabled
+                elif pmcm["mode"] == 2 or pmcm["mode"] == 3: # pv / pv+min
+                    self._dbusservice['/Mode'] = 1 # automatic
 
-            # read all other data
+            # Cache evse_uptime_start changes to not have to download evse/low_level_state
             cc = self.getWARPChargerData("/charge_tracker/current_charge")
-            es = self.getWARPChargerData("/evse/state")
-            ell = self.getWARPChargerData("/evse/low_level_state")
+            if cc is not None:
+                evse_uptime_start = cc["evse_uptime_start"]
+
+                # TODO fetch evse/low_level_state["time_since_state_change"]
+                # if self._last_evse_uptime_start is None and evse_uptime_start is not 0
+                # That means that the script restarted while charging
+
+                if self._last_evse_uptime_start != evse_uptime_start:
+                    self._last_evse_uptime_start = evse_uptime_start
+                    self._last_evse_uptime_start_change = time.time()
+
+                self._dbusservice['/ChargingTime'] = 0 if evse_uptime_start == 0 else (time.time() - self._last_evse_uptime_start_change)
+                self._dbusservice['/Ac/Energy/Forward'] = float(energy_import - cc["meter_start"]) # calculate charged energy
+
             esl = self.getWARPChargerData("/evse/slots")
+            if esl is not None:
+                self._dbusservice['/MaxCurrent'] = float(esl[5]["max_current"] / 1000.0) # external config slot
+                self._dbusservice['/SetCurrent'] = float(esl[8]["max_current"] / 1000.0) # external config slot
+                self._dbusservice['/AutoStart'] = 0 if esl[4]["clear_on_disconnect"] else 1 # autostart/button slot
 
-            #self._dbusservice['/MaxCurrent'] = float(es["allowed_charging_current"] / 1000.0) # will be set to 0A e.g. by load management
-            self._dbusservice['/MaxCurrent'] = float(esl[8]["max_current"] / 1000.0) # external config slot
-
-            if es is not None and ell is not None:
-                if es["charger_state"] == 3:
-                    self._dbusservice['/ChargingTime'] = int(ell["time_since_state_change"] / 1000.0)
-                    self._dbusservice['/Ac/Energy/Forward'] = float(enegry_import - cc["meter_start"]) # calculate charged energy
-                else:
-                    self._dbusservice['/ChargingTime'] = 0
-                    self._dbusservice['/Ac/Energy/Forward'] = 0.0 # calculate charged energy
-
+            es = self.getWARPChargerData("/evse/state")
             if es["charger_state"] == 0: # not connected
                 self._dbusservice['/Status'] = 0 # not connected
             elif es["charger_state"] == 1: # connected - wait for ok
@@ -245,21 +280,15 @@ class DbusWARPChargerService:
             else:
                 self._dbusservice['/Status'] = 8 # PLACEHOLDER: ground test error
 
-            easc = self.getWARPChargerData("/evse/auto_start_charging")
-            if easc["auto_start_charging"]:
-                self._dbusservice['/AutoStart'] = 1
-            else:
-                self._dbusservice['/AutoStart'] = 0
-
             if not self.enable_charging:
                 self._dbusservice['/StartStop'] = 0
             else:
                 self._dbusservice['/StartStop'] = 1
 
             # logging
-            logging.debug("Wallbox Consumption (/Ac/Power): %s" % (self._dbusservice['/Ac/Power']))
-            logging.debug("Wallbox Forward (/Ac/Energy/Forward): %s" % (self._dbusservice['/Ac/Energy/Forward']))
-            logging.debug("---")
+            #logging.debug("Wallbox Consumption (/Ac/Power): %s" % (self._dbusservice['/Ac/Power']))
+            #logging.debug("Wallbox Forward (/Ac/Energy/Forward): %s" % (self._dbusservice['/Ac/Energy/Forward']))
+            #logging.debug("---")
 
             # increment UpdateIndex - to show that new data is available
             index = self._dbusservice['/UpdateIndex'] + 1  # increment index
