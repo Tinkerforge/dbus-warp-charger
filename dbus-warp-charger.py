@@ -249,7 +249,9 @@ class DbusWARPChargerService:
                     self._last_evse_uptime_start_change = time.time()
 
                 self._dbusservice['/ChargingTime'] = 0 if evse_uptime_start == 0 else (time.time() - self._last_evse_uptime_start_change)
+                self._dbusservice['/Session/Time'] = self._dbusservice['/ChargingTime']
                 self._dbusservice['/Ac/Energy/Forward'] = float(energy_import - cc["meter_start"]) # calculate charged energy
+                self._dbusservice['/Session/Energy'] = self._dbusservice['/Ac/Energy/Forward']
 
             esl = self.getWARPChargerData("/evse/slots")
             if esl is not None:
@@ -361,6 +363,7 @@ def main():
             '/Ac/Voltage': {'initial': 0, 'textformat': _v},
             '/Ac/Frequency': {'initial': 0, 'textformat': _v},
             '/Ac/Energy/Forward': {'initial': 0, 'textformat': _kwh},
+            '/Session/Energy': {'initial': 0, 'textformat': _kwh},
 
             '/Current': {'initial': 0, 'textformat': _a},
             '/MaxCurrent': {'initial': 0, 'textformat': _a},
@@ -368,6 +371,7 @@ def main():
 
             '/AutoStart': {'initial': 0, 'textformat': _n},
             '/ChargingTime': {'initial': 0, 'textformat': _s},
+            '/Session/Time': {'initial': 0, 'textformat': _s},
             '/Mode': {'initial': 0, 'textformat': _n},
             '/StartStop': {'initial': 0, 'textformat': _n},
             '/Status': {'initial': 0, 'textformat': _n},
