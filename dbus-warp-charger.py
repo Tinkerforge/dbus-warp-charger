@@ -52,6 +52,22 @@ class DbusWARPChargerService:
         self.ip = str(config['DEFAULT']['IP'])
         self.acposition = int(config['DEFAULT']['Position'])
 
+        # Protocol / TLS handling.
+        # Newer WARP firmware can be set to "secure (HTTPS) only", in which case
+        # plain HTTP requests get a non-JSON "HTTP disabled; use HTTPS instead"
+        # reply and the driver crashes. Make the scheme configurable so the driver
+        # works regardless of the WARP's connection mode. Defaults to "http" so
+        # existing installations are unaffected.
+        self.protocol = str(config['DEFAULT'].get('Protocol', 'http')).strip().lower()
+        self.verify_tls = config.getboolean('DEFAULT', 'VerifyTLS', fallback=False)
+        self.baseurl = "{}://{}".format(self.protocol, self.ip)
+        if self.protocol == "https" and not self.verify_tls:
+            # The WARP ships with a self-signed certificate by default, so
+            # certificate verification is off by default. Silence the resulting
+            # urllib3 InsecureRequestWarning to keep the log clean.
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
         self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance), register=False)
         self._paths = paths
 
@@ -160,10 +176,10 @@ class DbusWARPChargerService:
 
 
     def setWARPChargerValue(self, path, dat):
-        requests.put(url = "http://" + self.ip + path, json = dat, timeout=5)
+        requests.put(url=self.baseurl + path, json=dat, timeout=5, verify=self.verify_tls)
 
     def getWARPChargerData(self, path):
-        return requests.get(url="http://" + self.ip + path, timeout=5).json()
+        return requests.get(url=self.baseurl + path, timeout=5, verify=self.verify_tls).json()
 
     def _signOfLife(self):
         self._update_meter_value_id_cache()
